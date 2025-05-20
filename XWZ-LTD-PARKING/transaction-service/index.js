@@ -1,15 +1,21 @@
 const express = require('express');
 const { Pool } = require('pg');
-const cors = require('cors');
 const jwt = require('jsonwebtoken');
+const cors = require('cors');
 const winston = require('winston');
 const swaggerUi = require('swagger-ui-express');
 const swaggerJsdoc = require('swagger-jsdoc');
 const { v4: uuidv4 } = require('uuid');
 
 const app = express();
+
+// Middleware
 app.use(express.json());
-app.use(cors({ origin: 'http://localhost:3004' }));
+app.use(cors({
+  origin: 'http://localhost:3000',
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
 
 // Logger setup
 const logger = winston.createLogger({
@@ -37,13 +43,32 @@ const JWT_SECRET = 'your_jwt_secret';
 const authenticateToken = (req, res, next) => {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
-  if (!token) return res.status(401).json({ error: 'Access denied' });
-
+  if (!token) {
+    return res.status(401).json({ error: 'Access denied' });
+  }
   jwt.verify(token, JWT_SECRET, (err, user) => {
-    if (err) return res.status(403).json({ error: 'Invalid token' });
+    if (err) {
+      return res.status(403).json({ error: 'Invalid token' });
+    }
     req.user = user;
     next();
   });
+};
+
+// Middleware for attendant role validation
+const requireAttendant = (req, res, next) => {
+  if (req.user.role !== 'attendant') {
+    return res.status(403).json({ error: 'Attendant access required' });
+  }
+  next();
+};
+
+// Middleware for admin role validation
+const requireAdmin = (req, res, next) => {
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'Admin access required' });
+  }
+  next();
 };
 
 // Swagger setup
@@ -58,7 +83,7 @@ const swaggerOptions = {
       }
     }
   },
-  apis: ['index.js'] 
+  apis: ['./index.js']
 };
 
 const swaggerDocs = swaggerJsdoc(swaggerOptions);
@@ -89,7 +114,7 @@ app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerDocs));
  *                 type: string
  *                 example: PARK001
  *     responses:
- *       200:
+ *       201:
  *         description: Vehicle entry recorded successfully
  *         content:
  *           application/json:
@@ -114,41 +139,16 @@ app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerDocs));
  *                       example: 2025-05-20T13:12:00.000Z
  *       400:
  *         description: Missing required fields or no available spaces
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 error:
- *                   type: string
- *                   example: All fields are required
  *       403:
  *         description: Attendant access required
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 error:
- *                   type: string
- *                   example: Attendant access required
  *       500:
  *         description: Server error
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 error:
- *                   type: string
- *                   example: Server error
  */
-app.post('/api/transactions/entry', authenticateToken, async (req, res) => {
-  if (req.user.role !== 'attendant') return res.status(403).json({ error: 'Attendant access required' });
+app.post('/api/transactions/entry', authenticateToken, requireAttendant, async (req, res) => {
   try {
     const { plateNumber, parkingCode } = req.body;
     if (!plateNumber || !parkingCode) {
-      return res.status(400).json({ error: 'All fields are required' });
+      return res.status(400).json({ error: 'Plate number and parking code are required' });
     }
     const parking = await pool.query('SELECT "availableSpaces", "chargingFeePerHour" FROM parkings WHERE "code" = $1', [parkingCode]);
     if (parking.rows.length === 0 || parking.rows[0].availableSpaces <= 0) {
@@ -157,12 +157,12 @@ app.post('/api/transactions/entry', authenticateToken, async (req, res) => {
     const id = uuidv4();
     const entryDateTime = new Date().toISOString();
     await pool.query(
-      'INSERT INTO transactions ("id", "plateNumber", "parkingCode", "entryDateTime", "chargedAmount", "userId") VALUES ($1, $2, $3, $4, $5, $6)',
-      [id, plateNumber, parkingCode, entryDateTime, 0, req.user.id]
+      'INSERT INTO transactions ("id", "userId", "plateNumber", "parkingCode", "entryDateTime", "chargedAmount") VALUES ($1, $2, $3, $4, $5, $6)',
+      [id, req.user.id, plateNumber, parkingCode, entryDateTime, 0]
     );
     await pool.query('UPDATE parkings SET "availableSpaces" = "availableSpaces" - 1 WHERE "code" = $1', [parkingCode]);
     logger.info(`Car entered: ${plateNumber}, Parking: ${parkingCode}`);
-    res.json({ ticket: { id, plateNumber, parkingCode, entryDateTime } });
+    res.status(201).json({ ticket: { id, plateNumber, parkingCode, entryDateTime } });
   } catch (err) {
     logger.error(`Car entry error: ${err.message}`);
     res.status(500).json({ error: 'Server error' });
@@ -218,42 +218,20 @@ app.post('/api/transactions/entry', authenticateToken, async (req, res) => {
  *                       example: 2025-05-20T15:42:00.000Z
  *       400:
  *         description: Invalid transaction
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 error:
- *                   type: string
- *                   example: Invalid transaction
  *       403:
  *         description: Attendant access required
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 error:
- *                   type: string
- *                   example: Attendant access required
  *       500:
  *         description: Server error
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 error:
- *                   type: string
- *                   example: Server error
  */
-app.post('/api/transactions/exit', authenticateToken, async (req, res) => {
-  if (req.user.role !== 'attendant') return res.status(403).json({ error: 'Attendant access required' });
+app.post('/api/transactions/exit', authenticateToken, requireAttendant, async (req, res) => {
   try {
     const { id } = req.body;
+    if (!id) {
+      return res.status(400).json({ error: 'Transaction ID is required' });
+    }
     const transaction = await pool.query('SELECT * FROM transactions WHERE "id" = $1 AND "exitDateTime" IS NULL', [id]);
     if (transaction.rows.length === 0) {
-      return res.status(400).json({ error: 'Invalid transaction' });
+      return res.status(400).json({ error: 'Invalid or already exited transaction' });
     }
     const parking = await pool.query('SELECT "chargingFeePerHour" FROM parkings WHERE "code" = $1', [transaction.rows[0].parkingCode]);
     const entryTime = new Date(transaction.rows[0].entryDateTime);
@@ -261,7 +239,7 @@ app.post('/api/transactions/exit', authenticateToken, async (req, res) => {
     const hours = (exitTime - entryTime) / (1000 * 60 * 60);
     const chargedAmount = hours * parking.rows[0].chargingFeePerHour;
     await pool.query(
-      'UPDATE transactions SET "exitDateTime" = $1, "chargedAmount" = $2 WHERE "id" = $3',
+      'UPDATE transactions SET "exitDateTime" = $1, "chargedAmount" = $2 WHERE id = $3',
       [exitTime.toISOString(), chargedAmount, id]
     );
     await pool.query('UPDATE parkings SET "availableSpaces" = "availableSpaces" + 1 WHERE "code" = $1', [transaction.rows[0].parkingCode]);
@@ -287,86 +265,63 @@ app.post('/api/transactions/exit', authenticateToken, async (req, res) => {
  *         schema:
  *           type: integer
  *           default: 1
- *         description: Page number for pagination
  *       - in: query
  *         name: limit
  *         schema:
  *           type: integer
  *           default: 10
- *         description: Number of transactions per page
  *     responses:
  *       200:
  *         description: List of user transactions
  *         content:
  *           application/json:
  *             schema:
- *               type: array
- *               items:
- *                 type: object
- *                 properties:
- *                   id:
- *                     type: string
- *                     example: 123e4567-e89b-12d3-a456-426614174000
- *                   plateNumber:
- *                     type: string
- *                     example: ABC123
- *                   parkingCode:
- *                     type: string
- *                     example: PARK001
- *                   entryDateTime:
- *                     type: string
- *                     format: date-time
- *                     example: 2025-05-20T13:12:00.000Z
- *                   exitDateTime:
- *                     type: string
- *                     format: date-time
- *                     example: 2025-05-20T15:42:00.000Z
- *                   chargedAmount:
- *                     type: number
- *                     example: 7.50
- *                   userId:
- *                     type: string
- *                     example: 987e6543-e21b-12d3-a456-426614174000
- *       401:
- *         description: Access denied, no token provided
- *         content:
- *           application/json:
- *             schema:
  *               type: object
  *               properties:
- *                 error:
- *                   type: string
- *                   example: Access denied
+ *                 transactions:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       id:
+ *                         type: string
+ *                       plateNumber:
+ *                         type: string
+ *                       parkingCode:
+ *                         type: string
+ *                       entryDateTime:
+ *                         type: string
+ *                         format: date-time
+ *                       exitDateTime:
+ *                         type: string
+ *                         format: date-time
+ *                       chargedAmount:
+ *                         type: number
+ *                 totalPages:
+ *                   type: integer
+ *       401:
+ *         description: Access denied
  *       403:
  *         description: Invalid token
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 error:
- *                   type: string
- *                   example: Invalid token
  *       500:
  *         description: Server error
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 error:
- *                   type: string
- *                   example: Server error
  */
 app.get('/api/transactions/user', authenticateToken, async (req, res) => {
   try {
     const { page = 1, limit = 10 } = req.query;
     const offset = (page - 1) * limit;
     const result = await pool.query(
-      'SELECT * FROM transactions WHERE "userId" = $1 ORDER BY "entryDateTime" DESC LIMIT $2 OFFSET $3',
+      'SELECT "id", "plateNumber", "parkingCode", "entryDateTime", "exitDateTime", "chargedAmount" FROM transactions WHERE "userId" = $1 ORDER BY "entryDateTime" DESC LIMIT $2 OFFSET $3',
       [req.user.id, limit, offset]
     );
-    res.json(result.rows);
+    const countResult = await pool.query(
+      'SELECT COUNT(*) FROM transactions WHERE "userId" = $1',
+      [req.user.id]
+    );
+    const totalRecords = parseInt(countResult.rows[0].count, 10);
+    const totalPages = Math.ceil(totalRecords / limit);
+    logger.info(`Fetched transactions for user: ${req.user.id}`);
+    res.json({ transactions: result.rows, totalPages });
   } catch (err) {
     logger.error(`Fetch transactions error: ${err.message}`);
     res.status(500).json({ error: 'Server error' });
@@ -388,117 +343,118 @@ app.get('/api/transactions/user', authenticateToken, async (req, res) => {
  *           type: string
  *           format: date-time
  *         required: true
- *         description: Start date for the report
- *         example: 2025-05-01T00:00:00.000Z
  *       - in: query
  *         name: endDate
  *         schema:
  *           type: string
  *           format: date-time
  *         required: true
- *         description: End date for the report
- *         example: 2025-05-20T23:59:59.999Z
  *       - in: query
  *         name: type
  *         schema:
  *           type: string
  *           enum: [incoming, outgoing]
  *         required: true
- *         description: Type of transactions to report (incoming or outgoing)
- *         example: outgoing
  *       - in: query
  *         name: page
  *         schema:
  *           type: integer
  *           default: 1
- *         description: Page number for pagination
  *       - in: query
  *         name: limit
  *         schema:
  *           type: integer
  *           default: 10
- *         description: Number of transactions per page
  *     responses:
  *       200:
- *         description: List of transactions for the specified date range
+ *         description: List of transactions
  *         content:
  *           application/json:
  *             schema:
- *               type: array
- *               items:
- *                 type: object
- *                 properties:
- *                   id:
- *                     type: string
- *                     example: 123e4567-e89b-12d3-a456-426614174000
- *                   plateNumber:
- *                     type: string
- *                     example: ABC123
- *                   parkingCode:
- *                     type: string
- *                     example: PARK001
- *                   entryDateTime:
- *                     type: string
- *                     format: date-time
- *                     example: 2025-05-20T13:12:00.000Z
- *                   exitDateTime:
- *                     type: string
- *                     format: date-time
- *                     example: 2025-05-20T15:42:00.000Z
- *                   chargedAmount:
- *                     type: number
- *                     example: 7.50
- *                   userId:
- *                     type: string
- *                     example: 987e6543-e21b-12d3-a456-426614174000
+ *               type: object
+ *               properties:
+ *                 transactions:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       id:
+ *                         type: string
+ *                       plateNumber:
+ *                         type: string
+ *                       parkingCode:
+ *                         type: string
+ *                       entryDateTime:
+ *                         type: string
+ *                         format: date-time
+ *                       exitDateTime:
+ *                         type: string
+ *                         format: date-time
+ *                       chargedAmount:
+ *                         type: number
+ *                 totalPages:
+ *                   type: integer
  *       401:
- *         description: Access denied, no token provided
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 error:
- *                   type: string
- *                   example: Access denied
+ *         description: Access denied
  *       403:
- *         description: Admin access required or invalid token
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 error:
- *                   type: string
- *                   example: Admin access required
+ *         description: Admin access required
  *       500:
  *         description: Server error
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 error:
- *                   type: string
- *                   example: Server error
  */
-app.get('/api/transactions/reports', authenticateToken, async (req, res) => {
-  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin access required' });
+app.get('/api/transactions/reports', authenticateToken, requireAdmin, async (req, res) => {
   try {
     const { startDate, endDate, type, page = 1, limit = 10 } = req.query;
-    const offset = (page - 1) * limit;
-    let query = '';
-    if (type === 'outgoing') {
-      query = 'SELECT * FROM transactions WHERE "exitDateTime" BETWEEN $1 AND $2 ORDER BY "exitDateTime" DESC LIMIT $3 OFFSET $4';
-    } else {
-      query = 'SELECT * FROM transactions WHERE "entryDateTime" BETWEEN $1 AND $2 ORDER BY "entryDateTime" DESC LIMIT $3 OFFSET $4';
+    if (!startDate || !endDate || !type) {
+      return res.status(400).json({ error: 'startDate, endDate, and type are required' });
     }
-    const result = await pool.query(query, [startDate, endDate, limit, offset]);
-    res.json(result.rows);
+    const offset = (page - 1) * limit;
+    let query = 'SELECT "id", "plateNumber", "parkingCode", "entryDateTime", "exitDateTime", "chargedAmount" FROM transactions WHERE 1=1';
+    let countQuery = 'SELECT COUNT(*) FROM transactions WHERE 1=1';
+    const params = [];
+    if (type === 'incoming') {
+      query += ' AND "entryDateTime" IS NOT NULL';
+      countQuery += ' AND "entryDateTime" IS NOT NULL';
+      if (startDate) {
+        params.push(startDate);
+        query += ` AND "entryDateTime" >= $${params.length}`;
+        countQuery += ` AND "entryDateTime" >= $${params.length}`;
+      }
+      if (endDate) {
+        params.push(endDate);
+        query += ` AND "entryDateTime" <= $${params.length}`;
+        countQuery += ` AND "entryDateTime" <= $${params.length}`;
+      }
+    } else if (type === 'outgoing') {
+      query += ' AND "exitDateTime" IS NOT NULL';
+      countQuery += ' AND "exitDateTime" IS NOT NULL';
+      if (startDate) {
+        params.push(startDate);
+        query += ` AND "exitDateTime" >= $${params.length}`;
+        countQuery += ` AND "exitDateTime" >= $${params.length}`;
+      }
+      if (endDate) {
+        params.push(endDate);
+        query += ` AND "exitDateTime" <= $${params.length}`;
+        countQuery += ` AND "exitDateTime" <= $${params.length}`;
+      }
+    } else {
+      return res.status(400).json({ error: 'Invalid type. Must be "incoming" or "outgoing"' });
+    }
+    query += ` ORDER BY ${type === 'incoming' ? '"entryDateTime"' : '"exitDateTime"'} DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
+    params.push(limit, offset);
+    const result = await pool.query(query, params);
+    const countResult = await pool.query(countQuery, params.slice(0, -2));
+    const totalRecords = parseInt(countResult.rows[0].count, 10);
+    const totalPages = Math.ceil(totalRecords / limit);
+    logger.info(`Fetched ${type} reports for admin`);
+    res.json({ transactions: result.rows, totalPages });
   } catch (err) {
-    logger.error(`Report error: ${err.message}`);
+    logger.error(`Fetch reports error: ${err.message}`);
     res.status(500).json({ error: 'Server error' });
   }
 });
 
-app.listen(3003, () => logger.info('Transaction Service running on port 3003'));
+// Start server
+app.listen(3003, () => {
+  logger.info('Transaction Service running on port 3003');
+});

@@ -7,8 +7,14 @@ const swaggerUi = require('swagger-ui-express');
 const swaggerJsdoc = require('swagger-jsdoc');
 
 const app = express();
+
+// Middleware
 app.use(express.json());
-app.use(cors({ origin: 'http://localhost:3004' })); // Updated to match frontend origin
+app.use(cors({
+  origin: 'http://localhost:3000',
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
 
 // Logger setup
 const logger = winston.createLogger({
@@ -36,36 +42,47 @@ const JWT_SECRET = 'your_jwt_secret';
 const authenticateToken = (req, res, next) => {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
-  if (!token) return res.status(401).json({ error: 'Access denied' });
-
+  if (!token) {
+    return res.status(401).json({ error: 'Access denied' });
+  }
   jwt.verify(token, JWT_SECRET, (err, user) => {
-    if (err) return res.status(403).json({ error: 'Invalid token' });
+    if (err) {
+      return res.status(403).json({ error: 'Invalid token' });
+    }
     req.user = user;
     next();
   });
+};
+
+// Middleware for admin role validation
+const requireAdmin = (req, res, next) => {
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'Admin access required' });
+  }
+  next();
 };
 
 // Swagger setup
 const swaggerOptions = {
   swaggerDefinition: {
     openapi: '3.0.0',
-    info: { 
-      title: 'Parking Service API', 
+    info: {
+      title: 'Parking Service API',
       version: '1.0.0',
       description: 'API for managing parking lots'
     },
     servers: [{ url: 'http://localhost:3002' }],
     components: {
       securitySchemes: {
-        bearerAuth: { 
-          type: 'http', 
-          scheme: 'bearer', 
-          bearerFormat: 'JWT' 
+        bearerAuth: {
+          type: 'http',
+          scheme: 'bearer',
+          bearerFormat: 'JWT'
         }
       }
     }
   },
-  apis: ['index.js'] // Include this file for Swagger parsing
+  apis: ['./index.js']
 };
 
 const swaggerDocs = swaggerJsdoc(swaggerOptions);
@@ -90,9 +107,6 @@ app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerDocs));
  *               items:
  *                 type: object
  *                 properties:
- *                   id:
- *                     type: integer
- *                     description: The parking lot ID
  *                   code:
  *                     type: string
  *                     description: The unique code for the parking lot
@@ -141,7 +155,10 @@ app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerDocs));
  */
 app.get('/api/parkings', authenticateToken, async (req, res) => {
   try {
-    const result = await pool.query('SELECT * FROM parkings');
+    const result = await pool.query(
+      'SELECT code, "parkingName" AS "parkingName", "availableSpaces" AS "availableSpaces", "location", "chargingFeePerHour" AS "chargingFeePerHour" FROM parkings'
+    );
+    logger.info('Fetched parkings');
     res.json(result.rows);
   } catch (err) {
     logger.error(`Fetch parkings error: ${err.message}`);
@@ -196,7 +213,7 @@ app.get('/api/parkings', authenticateToken, async (req, res) => {
  *               properties:
  *                 message:
  *                   type: string
- *                   example: Parking lot added
+ *                   example: Parking added
  *       400:
  *         description: Missing required fields
  *         content:
@@ -238,22 +255,25 @@ app.get('/api/parkings', authenticateToken, async (req, res) => {
  *                   type: string
  *                   example: Server error
  */
-app.post('/api/parkings', authenticateToken, async (req, res) => {
+app.post('/api/parkings', authenticateToken, requireAdmin, async (req, res) => {
   try {
     const { code, parkingName, availableSpaces, location, chargingFeePerHour } = req.body;
     if (!code || !parkingName || !availableSpaces || !location || !chargingFeePerHour) {
       return res.status(400).json({ error: 'All fields are required' });
     }
     await pool.query(
-      'INSERT INTO parkings (code, parkingName, availableSpaces, location, chargingFeePerHour) VALUES ($1, $2, $3, $4, $5)',
+      'INSERT INTO parkings ("code", "parkingName", "availableSpaces", "location", "chargingFeePerHour") VALUES ($1, $2, $3, $4, $5)',
       [code, parkingName, availableSpaces, location, chargingFeePerHour]
     );
-    logger.info(`Parking lot added: ${code}`);
-    res.status(201).json({ message: 'Parking lot added' });
+    logger.info(`Parking added: ${code}`);
+    res.status(201).json({ message: 'Parking added' });
   } catch (err) {
     logger.error(`Add parking error: ${err.message}`);
     res.status(500).json({ error: 'Server error' });
   }
 });
 
-app.listen(3002, () => logger.info('Parking Service running on port 3002'));
+// Start server
+app.listen(3002, () => {
+  logger.info('Parking Service running on port 3002');
+});
